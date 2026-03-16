@@ -81,18 +81,23 @@ $$q_i = \beta \cdot \frac{\exp\!\left(\frac{a_i - p_i/\alpha}{\mu}\right)}{\exp\
 
 默认参数：$\beta=100,\ a_i=a_j=2,\ a_0=0,\ \mu=0.25$
 
-**公共经济周期：** 若设置 `cycle_effect_share > 0`，则在期望销量上乘
+**公共经济周期：** 若设置 `cycle_effect_share > 0`，则在期望销量上乘一个公共市场因子：
 
-$$m_t = b + A\cos\left(2\pi \cdot \frac{(t-1)\bmod T}{T}\right)$$
+```text
+m_t = b + A * cos(2π * ((t - 1) mod T) / T)
+```
 
 其中：
-- $b =$ `cycle_baseline`
-- $T =$ `cycle_period`
-- $A = 0.5 \times \text{cycle\_effect\_share} \times b$
+- `b` 表示 `cycle_baseline`
+- `T` 表示 `cycle_period`
+- `s` 表示 `cycle_effect_share`
+- `A = 0.5 * s * b`
 
 因此峰谷差满足：
 
-$$\max(m_t)-\min(m_t) = \text{cycle\_effect\_share} \times \text{mean}(m_t)$$
+```text
+max(m_t) - min(m_t) = s * mean(m_t)
+```
 
 **噪声模型：** 对数正态乘法噪声，均值为 1，即 $q^{\text{real}} = q^{\text{exp}} \cdot \varepsilon$，其中 $\varepsilon \sim \text{LogNormal}(-\tfrac{1}{2}\sigma^2,\, \sigma^2)$。若同时开启周期与噪声，则顺序为：`logit demand -> cycle factor -> realised noise`。
 
