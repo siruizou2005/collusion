@@ -1,6 +1,6 @@
 # 算法共谋仿真系统
 
-基于大语言模型（LLM）定价智能体的重复博弈实验平台，复现并拓展 [文献] 中关于算法共谋的核心实验设置，研究不同随机噪声水平对 LLM 定价智能体在重复 Bertrand 双寡头市场中维持超竞争价格能力的影响。
+基于大语言模型（LLM）定价智能体的重复博弈实验平台，复现并拓展 [文献] 中关于算法共谋的核心实验设置。当前版本同时支持研究两类市场扰动：个体销量随机性，以及公共市场经济周期对重复 Bertrand 双寡头定价与共谋稳定性的影响。
 
 ---
 
@@ -27,7 +27,14 @@
 2. 输出观察与思考、更新的计划/洞察，以及本期选择的价格
 3. 双方同时出价，互不知晓对方当期决策
 
-市场环境采用 **logit 需求模型** 计算期望销量，并可叠加**对数正态乘法噪声**模拟随机需求波动。实验关注的核心问题是：噪声水平越高，共谋是否越难以维持？
+市场环境采用 **logit 需求模型** 计算期望销量，并支持两种可叠加的环境变化：
+
+1. **公共经济周期**：用正基线上的余弦因子缩放整体市场规模
+2. **个体销量随机性**：用对数正态乘法噪声扰动 realised quantity
+
+实验现在可同时回答两类问题：
+- 周期性繁荣/低迷会如何影响算法共谋的形成与维持？
+- 个体销量噪声是否会削弱这种高价协调？
 
 ---
 
@@ -63,7 +70,7 @@
 
 | 函数 | 说明 |
 |------|------|
-| `compute_expected_quantity(p_i, p_j, alpha, ...)` | logit 需求模型，返回双方期望销量 |
+| `compute_expected_quantity(p_i, p_j, alpha, ..., market_factor)` | logit 需求模型，返回双方期望销量，可乘公共市场因子 |
 | `compute_realised_quantity(q_exp, noise_sigma)` | 对期望销量叠加对数正态乘法噪声 |
 | `compute_profit(price, quantity, alpha, cost)` | 利润 = (price − α × cost) × quantity |
 | `find_static_optima(alpha, ...)` | 用 best-response fixed point 求纳什价格，并用联合利润最大化求垄断价格 |
@@ -74,7 +81,20 @@ $$q_i = \beta \cdot \frac{\exp\!\left(\frac{a_i - p_i/\alpha}{\mu}\right)}{\exp\
 
 默认参数：$\beta=100,\ a_i=a_j=2,\ a_0=0,\ \mu=0.25$
 
-**噪声模型：** 对数正态乘法噪声，均值为 1，即 $q^{\text{real}} = q^{\text{exp}} \cdot \varepsilon$，其中 $\varepsilon \sim \text{LogNormal}(-\tfrac{1}{2}\sigma^2,\, \sigma^2)$
+**公共经济周期：** 若设置 `cycle_effect_share > 0`，则在期望销量上乘
+
+$$m_t = b + A\cos\left(2\pi \cdot \frac{(t-1)\bmod T}{T}\right)$$
+
+其中：
+- $b =$ `cycle_baseline`
+- $T =$ `cycle_period`
+- $A = 0.5 \times \text{cycle\_effect\_share} \times b$
+
+因此峰谷差满足：
+
+$$\max(m_t)-\min(m_t) = \text{cycle\_effect\_share} \times \text{mean}(m_t)$$
+
+**噪声模型：** 对数正态乘法噪声，均值为 1，即 $q^{\text{real}} = q^{\text{exp}} \cdot \varepsilon$，其中 $\varepsilon \sim \text{LogNormal}(-\tfrac{1}{2}\sigma^2,\, \sigma^2)$。若同时开启周期与噪声，则顺序为：`logit demand -> cycle factor -> realised noise`。
 
 ---
 
@@ -117,6 +137,9 @@ $$q_i = \beta \cdot \frac{\exp\!\left(\frac{a_i - p_i/\alpha}{\mu}\right)}{\exp\
 | `cost` | `1.0` | 单位生产成本 |
 | `n_periods` | `300` | 博弈期数 |
 | `history_window` | `100` | 提示词中历史回顾窗口 |
+| `cycle_effect_share` | `0.0` | 周期强度，定义为峰谷差 = 均值 × share |
+| `cycle_period` | `150` | 一个完整余弦周期的期数 |
+| `cycle_baseline` | `1.0` | 公共市场因子的正基线 |
 | `model` | `gemini-3-flash-preview` | LLM 模型名 |
 | `benchmark_price_max` | `None` | benchmark 搜索上限；为空时自动扩展搜索区间 |
 | `price_floor` | `alpha * cost` | 价格下限，默认与 benchmark 下界一致 |
@@ -129,19 +152,22 @@ $$q_i = \beta \cdot \frac{\exp\!\left(\frac{a_i - p_i/\alpha}{\mu}\right)}{\exp\
 **每期流程：**
 1. 双方智能体各自构建提示词 → 调用 LLM（最多重试 10 次）→ 解析价格
 2. 若连续 10 次无法得到合法价格，则终止该 run
-3. 计算双方期望销量 → 叠加噪声 → 计算利润 → 更新历史
+3. 计算双方期望销量 → 乘公共周期因子 → 按需叠加个体噪声 → 计算利润 → 更新历史
 4. 立刻追加事件日志，并在期末写入 checkpoint，便于中途恢复
 
 **断点恢复文件：**
 - `events.jsonl`：逐条记录 prompt、response、decision、period_complete
 - `checkpoint.json`：保存最近一个完整 period 的市场状态与 agent 状态
 - `summary.json`：单个 run 结束后的汇总结果
+- 目录按 `prompt/noise/cycle/period/baseline/alpha/run/session_timestamp` 分层，避免不同实验互相覆盖
 
 **汇总指标**（取最后 50 期均值）：
 - `avg_price_A/B`：双方平均价格
 - `avg_total_profit`：总利润均值
 - `price_collusion_index`：价格共谋指数，0 = 纳什，1 = 垄断，低于 0 表示低于纳什，高于 1 表示高于垄断参考线
 - `profit_collusion_index`：利润共谋指数
+- `avg_market_factor / min_market_factor / max_market_factor`：本次 run 的公共市场因子统计
+- `high_phase_* / low_phase_*`：周期高位与低位阶段的价格和利润均值
 
 共谋指数定义：
 $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Nash}}}$$
@@ -150,7 +176,7 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 
 ### `main.py` — 命令行入口
 
-解析参数 → 设置随机种子 → 遍历噪声水平 × α × 运行次数 → 汇总写入 CSV。
+解析参数 → 设置随机种子 → 遍历 prompt × 周期强度 × 噪声水平 × α × 运行次数 → 汇总写入 CSV。
 
 噪声水平映射：
 
@@ -161,7 +187,7 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 | `medium` | 0.15 |
 | `high` | 0.30 |
 
-当前支持 `P0 / P1 / P2` 三个前缀；所有实验条件都会附加 `C` 随机波动提醒。
+当前支持 `P0 / P1 / P2` 三个前缀；所有实验条件都会附加泛化 `C` 市场变化提醒，但**不会**在提示词里显式告诉模型“当前市场存在一个可预测余弦周期”。
 
 ---
 
@@ -172,7 +198,7 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install numpy pandas openai
+pip install numpy pandas google-genai
 ```
 
 ### 2. 配置 API（可选）
@@ -184,10 +210,10 @@ export OPENAI_BASE_URL="https://generativelanguage.googleapis.com/v1beta/openai/
 
 若不配置 API Key，run 会在连续解析失败后终止，而不是随机兜底继续跑。
 
-### 3. 快速冒烟测试（无需 API Key）
+### 3. 快速冒烟测试
 
 ```bash
-python main.py --runs 1 --noise_levels none --alphas 1 --output smoke.csv
+python main.py --runs 1 --noise_levels none --alphas 1 --cycle_effect_shares 0 --output smoke.csv
 ```
 
 ### 4. 完整实验（默认参数）
@@ -196,7 +222,7 @@ python main.py --runs 1 --noise_levels none --alphas 1 --output smoke.csv
 python main.py --output results.csv --runs 3
 ```
 
-默认遍历：4 种噪声水平 × 3 个 α 值 × 3 次运行 = **36 次仿真**，每次 300 期。
+默认遍历：4 种噪声水平 × 1 个周期强度 × 3 个 α 值 × 3 次运行 = **36 次仿真**，每次 300 期。
 
 ---
 
@@ -210,7 +236,7 @@ export GEMINI_API_KEY="AIza..."
 python main.py --model gemini-3-flash-preview --output results.csv --runs 3
 ```
 
-项目根目录下的 `.env` 也会被自动读取，因此通常不需要手动 `export`。兼容字段 `OPENAI_API_KEY` 仍会作为最后兜底读取，但主路径已不再依赖 `OPENAI_BASE_URL`。
+项目根目录下的 `.env` 也会被自动读取，因此通常不需要手动 `export`。兼容字段 `OPENAI_API_KEY` 仍会作为最后兜底读取，但主路径已不再依赖 `OPENAI_BASE_URL`。如果当前环境网络不可用，代码会在第 1 期因无法拿到合法价格而中止 run。
 
 ---
 
@@ -228,11 +254,15 @@ python main.py [选项]
 | `--alphas` | `1,3.2,10` | 逗号分隔的 α 值列表 |
 | `--prompt_families` | `P0` | 逗号分隔的提示词版本列表：`P0,P1,P2` |
 | `--n_periods` | `300` | 每次 run 的博弈期数 |
+| `--cycle_effect_shares` | `0` | 逗号分隔的周期强度列表，定义为 `max-min = share * mean` |
+| `--cycle_period` | `150` | 一个完整余弦周期对应的期数 |
+| `--cycle_baseline` | `1.0` | 公共市场因子的正基线，默认围绕 1 波动 |
 | `--model` | `gemini-3-flash-preview` | LLM 模型名 |
 | `--temperature` | `1.0` | 采样温度；论文附录 B 默认使用 1.0 |
 | `--seed` | `42` | 随机种子（保证可复现） |
 | `--checkpoint_dir` | `checkpoints` | 每个 run 的 checkpoint / event log / summary 存放目录 |
 | `--resume` | `False` | 从 `checkpoint_dir` 下的现有状态继续跑未完成 run |
+| `--session_tag` | 当前时间戳 | checkpoint session 标签；不传时自动生成，避免重复运行冲突 |
 
 **示例：** 仅测试高噪声、`P1` 提示词、α=3.2，运行 5 次
 
@@ -258,6 +288,19 @@ python main.py \
   --output smoke.csv
 ```
 
+**示例：** 跑一个 300 期的经济周期实验，150 期一个完整周期，峰谷差为均值的 20%
+
+```bash
+python main.py \
+  --prompt_families P2 \
+  --alphas 3.2 \
+  --noise_levels none \
+  --cycle_effect_shares 0.2 \
+  --cycle_period 150 \
+  --n_periods 300 \
+  --output cycle_p2_alpha3.2.csv
+```
+
 ---
 
 ## 输出说明
@@ -269,6 +312,7 @@ python main.py \
 | `prompt_family` | 实际使用的提示词系列（含 C 后缀） |
 | `noise_sigma` | 噪声 σ 值 |
 | `alpha` | 价格尺度参数 |
+| `cycle_effect_share` / `cycle_period` / `cycle_baseline` | 公共经济周期配置 |
 | `avg_price_A/B` | 最后 50 期双方平均价格 |
 | `avg_price_norm_A/B` | 归一化价格（除以 α） |
 | `avg_total_profit` | 最后 50 期双方总利润均值 |
@@ -277,7 +321,11 @@ python main.py \
 | `profit_collusion_index` | 利润共谋指数，可低于 0 或高于 1 |
 | `p_nash` / `p_monopoly` | 纳什均衡价格 / 垄断价格基准 |
 | `profit_nash` / `profit_monopoly` | 对应的单 firm 利润基准 |
+| `avg_market_factor` / `min_market_factor` / `max_market_factor` | 本次 run 的公共市场因子统计 |
+| `high_phase_avg_price` / `low_phase_avg_price` | 周期高位与低位阶段的平均价格 |
+| `high_phase_avg_total_profit` / `low_phase_avg_total_profit` | 周期高位与低位阶段的平均总利润 |
 | `noise_level` | 噪声水平字符串（none/low/medium/high） |
+| `session_tag` | 本次 checkpoint session 的时间标签 |
 | `run_idx` | 当前运行序号 |
 | `run_history` | 完整 300 期逐期历史（列表，用于深入分析） |
 

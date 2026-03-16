@@ -16,14 +16,17 @@ def compute_expected_quantity(price_i: float,
                               a_i: float = 2.0,
                               a_j: float = 2.0,
                               a0: float = 0.0,
-                              mu: float = 0.25) -> Tuple[float, float]:
+                              mu: float = 0.25,
+                              market_factor: float = 1.0) -> Tuple[float, float]:
     """Compute expected quantity for a two-firm logit demand model."""
+    if market_factor <= 0:
+        raise ValueError("market_factor must be strictly positive")
     u_i = math.exp((a_i - price_i / alpha) / mu)
     u_j = math.exp((a_j - price_j / alpha) / mu)
     u0 = math.exp(a0 / mu)
     denom = u_i + u_j + u0
-    q_i = beta * u_i / denom
-    q_j = beta * u_j / denom
+    q_i = market_factor * beta * u_i / denom
+    q_j = market_factor * beta * u_j / denom
     return q_i, q_j
 
 
@@ -47,13 +50,14 @@ def _profit_matrix(prices: np.ndarray,
                    mu: float,
                    beta: float,
                    a_i: float,
+                   a_j: float,
                    a0: float,
                    c: float) -> np.ndarray:
     """Return firm-i profit over all price pairs (p_i, p_j)."""
     price_i = prices[:, None]
     price_j = prices[None, :]
     u_i = np.exp((a_i - price_i / alpha) / mu)
-    u_j = np.exp((a_i - price_j / alpha) / mu)
+    u_j = np.exp((a_j - price_j / alpha) / mu)
     u0 = math.exp(a0 / mu)
     q_i = beta * u_i / (u_i + u_j + u0)
     return (price_i - alpha * c) * q_i
@@ -79,7 +83,7 @@ def _find_static_optima_cached(alpha: float,
 
     for _ in range(max_expansions + 1):
         prices = np.linspace(price_min, search_max, price_steps)
-        profit_i = _profit_matrix(prices, alpha, mu, beta, a_i, a0, c)
+        profit_i = _profit_matrix(prices, alpha, mu, beta, a_i, a_i, a0, c)
 
         # Nash benchmark: fixed point of the best-response correspondence.
         br_indices = profit_i.argmax(axis=0)

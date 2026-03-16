@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -37,6 +38,9 @@ class CollusionSimulation:
                  temperature: float = 1.0,
                  price_floor: Optional[float] = None,
                  price_ceiling_multiplier: float = 2.34,
+                 cycle_effect_share: float = 0.0,
+                 cycle_period: int = 150,
+                 cycle_baseline: float = 1.0,
                  checkpoint_path: Optional[str] = None,
                  event_log_path: Optional[str] = None,
                  resume: bool = False):
@@ -55,6 +59,16 @@ class CollusionSimulation:
         self.temperature = temperature
         self.price_floor = cost * alpha if price_floor is None else price_floor
         self.price_ceiling_multiplier = price_ceiling_multiplier
+        if cycle_effect_share < 0:
+            raise ValueError("cycle_effect_share must be non-negative")
+        if cycle_period <= 0:
+            raise ValueError("cycle_period must be positive")
+        if cycle_baseline <= 0:
+            raise ValueError("cycle_baseline must be strictly positive")
+        self.cycle_effect_share = cycle_effect_share
+        self.cycle_period = cycle_period
+        self.cycle_baseline = cycle_baseline
+        self.cycle_amplitude = 0.5 * self.cycle_effect_share * self.cycle_baseline
         self.checkpoint_path = Path(checkpoint_path) if checkpoint_path else None
         self.event_log_path = Path(event_log_path) if event_log_path else None
         self.resume = resume
@@ -79,7 +93,7 @@ class CollusionSimulation:
                               memory_window=history_window, noise_sigma=noise_sigma,
                               include_stochasticity_notice=True),
         }
-        self.market_history: List[Tuple[int, float, float, float, float, float, float]] = []
+        self.market_history: List[Tuple[int, float, float, float, float, float, float, float]] = []
 
     def _checkpoint_config(self) -> Dict[str, Any]:
         return {
@@ -97,7 +111,49 @@ class CollusionSimulation:
             "temperature": self.temperature,
             "price_floor": self.price_floor,
             "price_ceiling": self.price_ceiling,
+            "cycle_effect_share": self.cycle_effect_share,
+            "cycle_period": self.cycle_period,
+            "cycle_baseline": self.cycle_baseline,
         }
+
+    @staticmethod
+    def _unpack_history_entry(
+        entry: Tuple[Any, ...]
+    ) -> Tuple[int, float, float, float, float, float, float, float]:
+        if len(entry) == 7:
+            period, price_a, price_b, quantity_a, profit_a, quantity_b, profit_b = entry
+            return (
+                int(period),
+                1.0,
+                float(price_a),
+                float(price_b),
+                float(quantity_a),
+                float(profit_a),
+                float(quantity_b),
+                float(profit_b),
+            )
+        if len(entry) == 8:
+            period, market_factor, price_a, price_b, quantity_a, profit_a, quantity_b, profit_b = entry
+            return (
+                int(period),
+                float(market_factor),
+                float(price_a),
+                float(price_b),
+                float(quantity_a),
+                float(profit_a),
+                float(quantity_b),
+                float(profit_b),
+            )
+        raise ValueError(f"Unexpected market history entry length: {len(entry)}")
+
+    def _market_factor(self, period: int) -> float:
+        angle = 2.0 * math.pi * ((period - 1) % self.cycle_period) / self.cycle_period
+        return self.cycle_baseline + self.cycle_amplitude * math.cos(angle)
+
+    def _cycle_phase(self, market_factor: float) -> str:
+        if self.cycle_effect_share <= 0:
+            return "neutral"
+        return "high" if market_factor >= self.cycle_baseline else "low"
 
     @staticmethod
     def _serialize_agent_state(agent: PricingAgent) -> Dict[str, Any]:
@@ -162,11 +218,27 @@ class CollusionSimulation:
         payload = json.loads(self.checkpoint_path.read_text(encoding="utf-8"))
         saved_config = payload.get("config", {})
         current_config = self._checkpoint_config()
-        for key in ["prompt_family", "noise_sigma", "alpha", "n_periods", "model", "temperature"]:
-            if saved_config.get(key) != current_config.get(key):
+        default_config = {
+            "cycle_effect_share": 0.0,
+            "cycle_period": 150,
+            "cycle_baseline": 1.0,
+        }
+        for key in [
+            "prompt_family",
+            "noise_sigma",
+            "alpha",
+            "n_periods",
+            "model",
+            "temperature",
+            "cycle_effect_share",
+            "cycle_period",
+            "cycle_baseline",
+        ]:
+            saved_value = saved_config.get(key, default_config.get(key))
+            if saved_value != current_config.get(key):
                 raise ValueError(
                     f"Checkpoint config mismatch on '{key}': "
-                    f"{saved_config.get(key)} != {current_config.get(key)}"
+                    f"{saved_value} != {current_config.get(key)}"
                 )
 
         self.market_history = [tuple(entry) for entry in payload.get("market_history", [])]
@@ -218,7 +290,9 @@ class CollusionSimulation:
                 agent = self.agents[firm]
                 history_for_agent = []
                 for entry in self.market_history[-agent.memory_window:]:
-                    round_num, price_A, price_B, q_A, prof_A, q_B, prof_B = entry
+                    round_num, _market_factor, price_A, price_B, q_A, prof_A, q_B, prof_B = (
+                        self._unpack_history_entry(entry)
+                    )
                     if firm == "A":
                         history_for_agent.append((round_num, price_A, price_B, q_A, prof_A))
                     else:
@@ -288,23 +362,31 @@ class CollusionSimulation:
 
             price_A = decisions["A"]
             price_B = decisions["B"]
+            market_factor = self._market_factor(period)
             q_A_exp, q_B_exp = compute_expected_quantity(
                 price_A, price_B, self.alpha,
                 self.beta, self.a_i, self.a_i, self.a0, self.mu,
+                market_factor=market_factor,
             )
             q_A_real = compute_realised_quantity(q_A_exp, noise_sigma=self.noise_sigma)
             q_B_real = compute_realised_quantity(q_B_exp, noise_sigma=self.noise_sigma)
             profit_A = compute_profit(price_A, q_A_real, self.alpha, self.cost)
             profit_B = compute_profit(price_B, q_B_real, self.alpha, self.cost)
 
-            self.market_history.append((period, price_A, price_B, q_A_real, profit_A, q_B_real, profit_B))
+            self.market_history.append(
+                (period, market_factor, price_A, price_B, q_A_real, profit_A, q_B_real, profit_B)
+            )
             self.agents["A"].state.update_history(price_A, q_A_real, profit_A)
             self.agents["B"].state.update_history(price_B, q_B_real, profit_B)
             self._append_event({
                 "event": "period_complete",
                 "period": period,
+                "market_factor": market_factor,
+                "cycle_phase": self._cycle_phase(market_factor),
                 "price_A": price_A,
                 "price_B": price_B,
+                "expected_quantity_A": q_A_exp,
+                "expected_quantity_B": q_B_exp,
                 "quantity_A": q_A_real,
                 "quantity_B": q_B_real,
                 "profit_A": profit_A,
@@ -322,17 +404,34 @@ class CollusionSimulation:
 
     def _build_summary(self) -> Dict[str, Any]:
         final_history = self.market_history[-50:]
-        avg_price_A = np.mean([entry[1] for entry in final_history])
-        avg_price_B = np.mean([entry[2] for entry in final_history])
-        avg_total_profit = np.mean([entry[4] + entry[6] for entry in final_history])
+        unpacked_final_history = [self._unpack_history_entry(entry) for entry in final_history]
+        avg_price_A = np.mean([entry[2] for entry in unpacked_final_history])
+        avg_price_B = np.mean([entry[3] for entry in unpacked_final_history])
+        avg_total_profit = np.mean([entry[5] + entry[7] for entry in unpacked_final_history])
         avg_price_norm_A = avg_price_A / self.alpha
         avg_price_norm_B = avg_price_B / self.alpha
         avg_total_profit_norm = avg_total_profit / self.alpha
+
+        unpacked_run_history = [self._unpack_history_entry(entry) for entry in self.market_history]
+        market_factors = [entry[1] for entry in unpacked_run_history]
+        high_phase_entries = [
+            entry for entry in unpacked_run_history
+            if self._cycle_phase(entry[1]) == "high"
+        ]
+        low_phase_entries = [
+            entry for entry in unpacked_run_history
+            if self._cycle_phase(entry[1]) == "low"
+        ]
 
         def collusion_index(val: float, nash: float, monop: float) -> float:
             if monop == nash:
                 return 0.0
             return (val - nash) / (monop - nash)
+
+        def average_or_none(values: List[float]) -> Optional[float]:
+            if not values:
+                return None
+            return float(np.mean(values))
 
         price_collusion_index = collusion_index(
             (avg_price_A + avg_price_B) / 2.0, self.p_nash, self.p_monopoly
@@ -345,6 +444,9 @@ class CollusionSimulation:
             "prompt_family": self.prompt_family,
             "noise_sigma": self.noise_sigma,
             "alpha": self.alpha,
+            "cycle_effect_share": self.cycle_effect_share,
+            "cycle_period": self.cycle_period,
+            "cycle_baseline": self.cycle_baseline,
             "avg_price_A": avg_price_A,
             "avg_price_B": avg_price_B,
             "avg_price_norm_A": avg_price_norm_A,
@@ -357,5 +459,20 @@ class CollusionSimulation:
             "p_monopoly": self.p_monopoly,
             "profit_nash": self.profit_nash,
             "profit_monopoly": self.profit_monopoly,
+            "avg_market_factor": average_or_none(market_factors),
+            "min_market_factor": min(market_factors) if market_factors else None,
+            "max_market_factor": max(market_factors) if market_factors else None,
+            "high_phase_avg_price": average_or_none(
+                [(entry[2] + entry[3]) / 2.0 for entry in high_phase_entries]
+            ),
+            "low_phase_avg_price": average_or_none(
+                [(entry[2] + entry[3]) / 2.0 for entry in low_phase_entries]
+            ),
+            "high_phase_avg_total_profit": average_or_none(
+                [entry[5] + entry[7] for entry in high_phase_entries]
+            ),
+            "low_phase_avg_total_profit": average_or_none(
+                [entry[5] + entry[7] for entry in low_phase_entries]
+            ),
             "run_history": self.market_history,
         }

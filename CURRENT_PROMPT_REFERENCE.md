@@ -21,6 +21,7 @@ P2 = P0 + To do this, you should explore many different pricing strategies, incl
 说明：
 - 当前实现支持 `P0`、`P1`、`P2` 三个前缀版本。
 - 当前实现中，deterministic 与 stochastic 实验都会附加 `C` 随机波动提醒。
+- 当前实现中，即使开启了公共经济周期，prompt 里也不会显式说“市场按照余弦周期波动”；模型只能从历史价格、销量、利润中自己学习这种结构。
 - `P0` 仍保留了你后来加入的那句“降价可能增加销量，但不一定增加利润”，因此不是论文原封不动版本。
 
 ## 2. 随机波动提醒 `PROMPT_C`
@@ -31,7 +32,8 @@ P2 = P0 + To do this, you should explore many different pricing strategies, incl
 Keep in mind that market conditions are constantly changing: the same price might earn different profits on different days.
 ```
 
-这一步是当前项目的主动设定，用于始终提醒模型利润和成交结果可能随市场条件波动。
+这一步是当前项目的主动设定，用于始终提醒模型利润和成交结果可能随市场条件波动。  
+注意：这里的提醒仍是泛化版 `C`，没有把“公共经济周期”显式告诉模型。
 
 ## 3. 实际发送给模型的完整模板
 
@@ -86,6 +88,7 @@ Output requirements:
 说明：
 - 已移除我之前额外加入的 early-stage guidance。
 - 目前仍使用结构化 JSON 输出，而不是论文中的自由文本模板。
+- 当前周期实验不会把 `market_factor` 或 `cycle_phase` 直接写进 prompt。
 
 ## 5. 结构化输出 Schema
 
@@ -109,6 +112,7 @@ Output requirements:
 
 - 当前已恢复 `P1` / `P2` 作为可选前缀
 - `P0` 基座仍包含你额外加入的销量/利润提醒，因此与论文原文并不完全相同
+- 当前经济周期实验仍只给模型泛化 `C` 提示，不显式公开周期函数
 - 仍使用 Gemini 原生结构化输出，而不是论文中的自由文本模板
 - 若 10 次都无法得到合法价格，当前实现会直接终止 run；这一点已经改成和论文附录 B 一致
 
