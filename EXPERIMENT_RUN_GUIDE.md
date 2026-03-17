@@ -9,6 +9,8 @@
 
 这些命令都基于当前本地最新版实现，默认使用 Gemini、structured output、checkpoint 和 session 时间标签。
 
+另外，`quality_two_stage` 是一条独立实验线，不包含在下面四类周期实验里。当前推荐的质量预设是 `--quality_preset segmentation_v2`，它使用“两段市场 + 固定质量成本”，目标结构是 `LL` 为质量纳什、`HL` 为联合最优。
+
 ## 0. 准备
 
 先确保环境可用：
@@ -296,3 +298,71 @@ python main.py \
 ```
 
 这是当前最干净、最适合先出结论的一组。
+
+## 11. 两阶段质量实验（方案二 / segmentation_v2）
+
+这条实验线和上面的四类周期实验分开跑。当前版本的共同设置是：
+
+- `experiment_mode = quality_two_stage`
+- `quality_preset = segmentation_v2`
+- `quality_block_length = 10`
+- `n_periods = 500`
+- deterministic only：`noise_levels` 必须是 `none`，`cycle_effect_shares` 必须是 `0`
+
+### 11.1 先做 20 期短测
+
+```bash
+python main.py \
+  --experiment_mode quality_two_stage \
+  --prompt_families P2 \
+  --quality_preset segmentation_v2 \
+  --quality_block_length 10 \
+  --n_periods 20 \
+  --runs 1 \
+  --resume \
+  --output quality_v2_smoke_20.csv
+```
+
+### 11.2 正式 500 期单组实验
+
+```bash
+python main.py \
+  --experiment_mode quality_two_stage \
+  --prompt_families P2 \
+  --quality_preset segmentation_v2 \
+  --quality_block_length 10 \
+  --n_periods 500 \
+  --runs 1 \
+  --resume \
+  --output quality_v2_500.csv
+```
+
+### 11.3 做 `P0/P1/P2` 对照
+
+```bash
+python main.py \
+  --experiment_mode quality_two_stage \
+  --prompt_families P0,P1,P2 \
+  --quality_preset segmentation_v2 \
+  --quality_block_length 10 \
+  --n_periods 500 \
+  --runs 3 \
+  --resume \
+  --output quality_v2_prompt_compare.csv
+```
+
+### 11.4 推荐重点读的字段
+
+- `quality_nash_pair`
+- `joint_optimum_pair`
+- `quality_pair_share_LL/LH/HL/HH`
+- `last_window_quality_pair_share_LL/LH/HL/HH`
+- `avg_price_A`, `avg_price_B`
+- `avg_total_profit`
+- `profit_coordination_index`
+
+如果你要研究“是否从保守状态逐步走向 A 高质量 / B 低质量的分工协调”，最关键的是：
+
+- 后 100 期或后若干 block 的 `HL` 占比
+- `HL` 条件下 A 的价格是否持续高于 B
+- 总利润提高到底来自“更多进入 HL”，还是来自“进入 HL 后又进一步加价”

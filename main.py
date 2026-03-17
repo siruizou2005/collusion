@@ -40,7 +40,7 @@ def parse_args(argv: Optional[List[str]] = None) -> Dict[str, Any]:
     parser.add_argument("--cycle_baseline", type=float, default=1.0,
                         help="Positive baseline market factor around which the cycle oscillates.")
     parser.add_argument("--quality_preset", type=str, default="segmentation_v1",
-                        help="Quality-game preset for quality_two_stage mode.")
+                        help="Quality-game preset for quality_two_stage mode: segmentation_v1 or segmentation_v2.")
     parser.add_argument("--quality_block_length", type=int, default=10,
                         help="Rounds per locked quality block in quality_two_stage mode.")
     parser.add_argument("--model", type=str, default="gemini-3-flash-preview",

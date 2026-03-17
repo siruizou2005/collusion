@@ -96,6 +96,15 @@ This is a quality-choice round.
 - You do not observe the competitor's current quality choice yet.
 ```
 
+当 `quality_preset=segmentation_v2` 时，还会额外追加一段市场结构提示：
+
+```text
+- The market contains both premium and budget customers who value quality and price differently.
+- Firm A's high quality is positioned to serve the premium segment, while Firm B's low quality can remain attractive to budget buyers.
+- High quality mainly changes market positioning and requires a higher fixed investment; do not treat it as only a higher unit cost.
+- A quality choice can be worthwhile if it creates a profitable premium niche or reduces direct head-to-head price competition over the next block.
+```
+
 它还会额外提供：
 - 最近逐轮的质量/价格/销量/利润历史
 - 最近若干完整 block 的摘要
@@ -128,6 +137,14 @@ This is a pricing round inside a locked quality block.
 - Maximize long-run profit while accounting for the locked quality pair.
 ```
 
+当 `quality_preset=segmentation_v2` 时，价格阶段还会再补两句：
+
+```text
+- The locked quality pair can segment demand between premium and budget customers, not just shift one representative demand curve.
+- A high-quality offer may support a premium price without winning every customer, while a lower-quality offer can still earn strong profits if it remains attractive to budget buyers.
+- When qualities differ, Firm A may be better placed to earn from premium buyers and Firm B may still earn strongly from budget buyers; price for your role in the market, not only for volume.
+```
+
 它还会提供：
 - 最近逐轮质量/价格/销量/利润历史
 - `PRICE_PLANS.txt`
@@ -149,6 +166,7 @@ This is a pricing round inside a locked quality block.
 - 当前 `P0` 比论文多了“降价不一定提高利润”的显式提醒。
 - `pricing_only` 模式始终附加泛化 `C`，但不会显式告诉模型余弦周期函数。
 - `quality_two_stage` 模式当前不附加 `C`，而是强调质量锁定、block 利润和质量-需求权衡。
+- `quality_two_stage` 在 `segmentation_v2` 下会额外显式提示“两段市场 + 固定质量成本”的经济含义，但仍不会向模型暴露精确需求方程。
 - 两种模式都使用 Gemini 原生结构化 JSON，不是论文的自由文本模板。
 
 ## 5. 代码位置

@@ -201,6 +201,9 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 - 每 `10` 期只能在 block 起点重新选择一次质量
 - block 内每期仍然继续定价
 - 当前第一版只支持 deterministic 运行，不接周期与个体销量噪声
+- 当前提供两个质量预设：
+  - `segmentation_v1`：旧的线性需求版本，保留兼容性
+  - `segmentation_v2`：推荐使用的“两段市场 + 固定质量成本”版本，结构目标是 `LL` 为质量纳什、`HL` 为联合最优
 
 ---
 
@@ -271,7 +274,7 @@ python main.py [选项]
 | `--cycle_effect_shares` | `0` | 逗号分隔的周期强度列表，定义为 `max-min = share * mean` |
 | `--cycle_period` | `150` | 一个完整余弦周期对应的期数 |
 | `--cycle_baseline` | `1.0` | 公共市场因子的正基线，默认围绕 1 波动 |
-| `--quality_preset` | `segmentation_v1` | `quality_two_stage` 模式下使用的质量博弈预设 |
+| `--quality_preset` | `segmentation_v1` | `quality_two_stage` 模式下使用的质量博弈预设：`segmentation_v1` 或 `segmentation_v2` |
 | `--quality_block_length` | `10` | `quality_two_stage` 中每次质量选择锁定多少期 |
 | `--model` | `gemini-3-flash-preview` | LLM 模型名 |
 | `--temperature` | `1.0` | 采样温度；论文附录 B 默认使用 1.0 |
@@ -317,18 +320,36 @@ python main.py \
   --output cycle_p2_alpha3.2.csv
 ```
 
-**示例：** 跑一个 500 期的两阶段质量选择实验，每 10 期才允许重新选一次质量
+**示例：** 跑一个 500 期的两阶段质量选择实验，每 10 期才允许重新选一次质量。推荐使用新的 `segmentation_v2` 两段市场预设。
 
 ```bash
 python main.py \
   --experiment_mode quality_two_stage \
   --prompt_families P2 \
-  --quality_preset segmentation_v1 \
+  --quality_preset segmentation_v2 \
   --quality_block_length 10 \
   --n_periods 500 \
   --runs 1 \
   --output quality_two_stage.csv
 ```
+
+### `segmentation_v2` 预设的经济含义
+
+`segmentation_v2` 是当前推荐的质量博弈版本，核心不是简单把高质量的单位成本抬高，而是：
+
+- 使用两段市场：`premium` 与 `budget`
+- 让 A 的高质量更适合 premium 段
+- 让 B 的低质量继续适合 budget 段
+- 用更高的固定质量成本表示研发 / 设计 / 产线投入，而不是只靠边际成本差异
+
+当前静态 benchmark 设计目标是：
+
+- 质量阶段 Nash：`LL`
+- 联合最优：`HL`
+- 联合利润排序：`HL > LL > LH > HH`
+- `HL` 状态下 A 的联合最优价格显著高于 B
+
+这使得动态实验更适合研究“从保守低质量状态，是否会逐步转向 A 高质量 / B 低质量的分工协调”。
 
 ---
 

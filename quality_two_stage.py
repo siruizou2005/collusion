@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -86,11 +87,29 @@ class DemandSpec:
 
 
 @dataclass(frozen=True)
+class SegmentSpec:
+    weight: float
+    price_sensitivity: float
+    outside_utility: float
+    utilities: Dict[str, float]
+
+
+@dataclass(frozen=True)
 class QualityPreset:
     name: str
     price_cap: float
-    demand_specs: Dict[QualityPair, DemandSpec]
     cost_specs: Dict[str, Dict[Quality, CostSpec]]
+    demand_mode: Literal["linear_pair", "two_segment_logit"] = "linear_pair"
+    demand_specs: Optional[Dict[QualityPair, DemandSpec]] = None
+    market_size: float = 0.0
+    segment_specs: Optional[Dict[str, SegmentSpec]] = None
+    expected_quality_nash_pair: QualityPair = "LL"
+    expected_joint_optimum_pair: QualityPair = "LH"
+    expected_joint_profit_order: Optional[Tuple[QualityPair, ...]] = None
+    min_joint_vs_nash_avg_price_gap: Optional[Dict[QualityPair, float]] = None
+    min_joint_price_ratio_by_pair: Optional[Dict[QualityPair, float]] = None
+    quality_prompt_context: str = ""
+    price_prompt_context: str = ""
 
 
 @dataclass(frozen=True)
@@ -147,28 +166,93 @@ class QualityBlockAgentState:
 
 
 def get_quality_preset(name: str) -> QualityPreset:
-    if name != "segmentation_v1":
-        raise ValueError(f"Unknown quality preset: {name}")
-    return QualityPreset(
-        name=name,
-        price_cap=12.0,
-        demand_specs={
-            "LL": DemandSpec(10.0, 0.1, 10.0, 0.1),
-            "LH": DemandSpec(10.0, 0.3, 11.0, 0.6),
-            "HL": DemandSpec(11.0, 0.6, 10.0, 0.3),
-            "HH": DemandSpec(11.0, 0.1, 11.0, 0.1),
-        },
-        cost_specs={
-            "A": {
-                "L": CostSpec(1.0, 0.0),
-                "H": CostSpec(5.0, 10.0),
+    if name == "segmentation_v1":
+        return QualityPreset(
+            name=name,
+            price_cap=12.0,
+            cost_specs={
+                "A": {
+                    "L": CostSpec(1.0, 0.0),
+                    "H": CostSpec(5.0, 10.0),
+                },
+                "B": {
+                    "L": CostSpec(2.5, 0.0),
+                    "H": CostSpec(1.0, 35.0),
+                },
             },
-            "B": {
-                "L": CostSpec(2.5, 0.0),
-                "H": CostSpec(1.0, 35.0),
+            demand_mode="linear_pair",
+            demand_specs={
+                "LL": DemandSpec(10.0, 0.1, 10.0, 0.1),
+                "LH": DemandSpec(10.0, 0.3, 11.0, 0.6),
+                "HL": DemandSpec(11.0, 0.6, 10.0, 0.3),
+                "HH": DemandSpec(11.0, 0.1, 11.0, 0.1),
             },
-        },
-    )
+            expected_quality_nash_pair="LL",
+            expected_joint_optimum_pair="LH",
+        )
+    if name == "segmentation_v2":
+        return QualityPreset(
+            name=name,
+            price_cap=12.0,
+            cost_specs={
+                "A": {
+                    "L": CostSpec(0.91, 0.0),
+                    "H": CostSpec(1.415, 7.2),
+                },
+                "B": {
+                    "L": CostSpec(0.774, 0.0),
+                    "H": CostSpec(1.625, 8.602),
+                },
+            },
+            demand_mode="two_segment_logit",
+            market_size=43.428,
+            segment_specs={
+                "premium": SegmentSpec(
+                    weight=0.367,
+                    price_sensitivity=0.602,
+                    outside_utility=2.569,
+                    utilities={
+                        "AL": 3.593,
+                        "AH": 5.958,
+                        "BL": 3.772,
+                        "BH": 4.524,
+                    },
+                ),
+                "budget": SegmentSpec(
+                    weight=1.0 - 0.367,
+                    price_sensitivity=0.708,
+                    outside_utility=2.804,
+                    utilities={
+                        "AL": 5.83,
+                        "AH": 4.76,
+                        "BL": 6.195,
+                        "BH": 6.048,
+                    },
+                ),
+            },
+            expected_quality_nash_pair="LL",
+            expected_joint_optimum_pair="HL",
+            expected_joint_profit_order=("HL", "LL", "LH", "HH"),
+            min_joint_vs_nash_avg_price_gap={
+                "LL": 0.10,
+                "HL": 0.10,
+            },
+            min_joint_price_ratio_by_pair={
+                "HL": 1.15,
+            },
+            quality_prompt_context=(
+                "\n- The market contains both premium and budget customers who value quality and price differently.\n"
+                "- Firm A's high quality is positioned to serve the premium segment, while Firm B's low quality can remain attractive to budget buyers.\n"
+                "- High quality mainly changes market positioning and requires a higher fixed investment; do not treat it as only a higher unit cost.\n"
+                "- A quality choice can be worthwhile if it creates a profitable premium niche or reduces direct head-to-head price competition over the next block."
+            ),
+            price_prompt_context=(
+                "\n- The locked quality pair can segment demand between premium and budget customers, not just shift one representative demand curve.\n"
+                "- A high-quality offer may support a premium price without winning every customer, while a lower-quality offer can still earn strong profits if it remains attractive to budget buyers.\n"
+                "- When qualities differ, Firm A may be better placed to earn from premium buyers and Firm B may still earn strongly from budget buyers; price for your role in the market, not only for volume."
+            ),
+        )
+    raise ValueError(f"Unknown quality preset: {name}")
 
 
 def quality_pair_label(quality_a: Quality, quality_b: Quality) -> QualityPair:
@@ -181,10 +265,32 @@ def compute_quality_quantities(
     price_a: float,
     price_b: float,
 ) -> Tuple[float, float]:
-    spec = preset.demand_specs[quality_pair]
-    quantity_a = max(0.0, spec.intercept_a - price_a + spec.cross_a * price_b)
-    quantity_b = max(0.0, spec.intercept_b - price_b + spec.cross_b * price_a)
-    return quantity_a, quantity_b
+    if preset.demand_mode == "linear_pair":
+        if preset.demand_specs is None:
+            raise ValueError(f"Preset {preset.name} is missing linear demand specs")
+        spec = preset.demand_specs[quality_pair]
+        quantity_a = max(0.0, spec.intercept_a - price_a + spec.cross_a * price_b)
+        quantity_b = max(0.0, spec.intercept_b - price_b + spec.cross_b * price_a)
+        return quantity_a, quantity_b
+    if preset.demand_mode == "two_segment_logit":
+        if preset.segment_specs is None:
+            raise ValueError(f"Preset {preset.name} is missing segmented demand specs")
+        label_a = f"A{quality_pair[0]}"
+        label_b = f"B{quality_pair[1]}"
+        quantity_a = 0.0
+        quantity_b = 0.0
+        for segment in preset.segment_specs.values():
+            utility_a = segment.utilities[label_a] - segment.price_sensitivity * price_a
+            utility_b = segment.utilities[label_b] - segment.price_sensitivity * price_b
+            exp_outside = math.exp(segment.outside_utility)
+            exp_a = math.exp(utility_a)
+            exp_b = math.exp(utility_b)
+            denom = exp_outside + exp_a + exp_b
+            segment_mass = preset.market_size * segment.weight
+            quantity_a += segment_mass * exp_a / denom
+            quantity_b += segment_mass * exp_b / denom
+        return quantity_a, quantity_b
+    raise ValueError(f"Unknown demand mode for preset {preset.name}: {preset.demand_mode}")
 
 
 def compute_quality_profits(
@@ -218,9 +324,31 @@ def _quality_profit_matrices(
     price_b = prices[None, :]
     quality_a = quality_pair[0]
     quality_b = quality_pair[1]
-    demand_spec = preset.demand_specs[quality_pair]
-    quantity_a = np.maximum(0.0, demand_spec.intercept_a - price_a + demand_spec.cross_a * price_b)
-    quantity_b = np.maximum(0.0, demand_spec.intercept_b - price_b + demand_spec.cross_b * price_a)
+    if preset.demand_mode == "linear_pair":
+        if preset.demand_specs is None:
+            raise ValueError(f"Preset {preset.name} is missing linear demand specs")
+        demand_spec = preset.demand_specs[quality_pair]
+        quantity_a = np.maximum(0.0, demand_spec.intercept_a - price_a + demand_spec.cross_a * price_b)
+        quantity_b = np.maximum(0.0, demand_spec.intercept_b - price_b + demand_spec.cross_b * price_a)
+    elif preset.demand_mode == "two_segment_logit":
+        if preset.segment_specs is None:
+            raise ValueError(f"Preset {preset.name} is missing segmented demand specs")
+        label_a = f"A{quality_a}"
+        label_b = f"B{quality_b}"
+        quantity_a = np.zeros((price_a.shape[0], price_b.shape[1]))
+        quantity_b = np.zeros_like(quantity_a)
+        for segment in preset.segment_specs.values():
+            utility_a = segment.utilities[label_a] - segment.price_sensitivity * price_a
+            utility_b = segment.utilities[label_b] - segment.price_sensitivity * price_b
+            exp_outside = math.exp(segment.outside_utility)
+            exp_a = np.exp(utility_a)
+            exp_b = np.exp(utility_b)
+            denom = exp_outside + exp_a + exp_b
+            segment_mass = preset.market_size * segment.weight
+            quantity_a += segment_mass * exp_a / denom
+            quantity_b += segment_mass * exp_b / denom
+    else:
+        raise ValueError(f"Unknown demand mode for preset {preset.name}: {preset.demand_mode}")
     cost_a = preset.cost_specs["A"][quality_a]  # type: ignore[index]
     cost_b = preset.cost_specs["B"][quality_b]  # type: ignore[index]
     profit_a = (price_a - cost_a.variable_cost) * quantity_a - cost_a.fixed_cost
@@ -336,18 +464,59 @@ def get_static_quality_benchmarks(
 
 
 def validate_quality_benchmarks(benchmarks: StaticQualityBenchmarks) -> None:
-    if benchmarks.quality_nash_pair != "LL":
+    preset = get_quality_preset(benchmarks.preset_name)
+    if benchmarks.quality_nash_pair != preset.expected_quality_nash_pair:
         raise ValueError(
-            f"Expected quality Nash to be LL, got {benchmarks.quality_nash_pair}"
+            f"Expected quality Nash to be {preset.expected_quality_nash_pair}, "
+            f"got {benchmarks.quality_nash_pair}"
         )
-    if benchmarks.joint_optimum_pair != "LH":
+    if benchmarks.joint_optimum_pair != preset.expected_joint_optimum_pair:
         raise ValueError(
-            f"Expected bounded joint optimum to be LH, got {benchmarks.joint_optimum_pair}"
+            f"Expected bounded joint optimum to be {preset.expected_joint_optimum_pair}, "
+            f"got {benchmarks.joint_optimum_pair}"
         )
-    ll_nash = benchmarks.stage_game_outcomes["LL"]
-    lh_joint = benchmarks.stage_game_outcomes["LH"]
-    if lh_joint.joint_profit_a <= ll_nash.nash_profit_a or lh_joint.joint_profit_b <= ll_nash.nash_profit_b:
-        raise ValueError("Expected LH joint optimum to improve both firms over LL Nash")
+    quality_nash = benchmarks.stage_game_outcomes[preset.expected_quality_nash_pair]
+    joint_optimum = benchmarks.stage_game_outcomes[preset.expected_joint_optimum_pair]
+    if (
+        joint_optimum.joint_profit_a <= quality_nash.nash_profit_a
+        or joint_optimum.joint_profit_b <= quality_nash.nash_profit_b
+    ):
+        raise ValueError(
+            f"Expected {preset.expected_joint_optimum_pair} joint optimum to improve both firms over "
+            f"{preset.expected_quality_nash_pair} Nash"
+        )
+    if preset.expected_joint_profit_order is not None:
+        ordered_pairs = sorted(
+            QUALITY_PAIRS,
+            key=lambda pair: benchmarks.stage_game_outcomes[pair].joint_total_profit,
+            reverse=True,
+        )
+        if tuple(ordered_pairs) != preset.expected_joint_profit_order:
+            raise ValueError(
+                f"Expected joint-profit ranking {preset.expected_joint_profit_order}, got {tuple(ordered_pairs)}"
+            )
+    if preset.min_joint_vs_nash_avg_price_gap is not None:
+        for pair, minimum_gap in preset.min_joint_vs_nash_avg_price_gap.items():
+            outcome = benchmarks.stage_game_outcomes[pair]
+            avg_nash_price = (outcome.nash_price_a + outcome.nash_price_b) / 2.0
+            avg_joint_price = (outcome.joint_price_a + outcome.joint_price_b) / 2.0
+            if avg_nash_price <= 0.0:
+                raise ValueError(f"Non-positive Nash average price for {pair}")
+            realized_gap = (avg_joint_price - avg_nash_price) / avg_nash_price
+            if realized_gap < minimum_gap:
+                raise ValueError(
+                    f"Expected {pair} average price gap at least {minimum_gap:.3f}, got {realized_gap:.3f}"
+                )
+    if preset.min_joint_price_ratio_by_pair is not None:
+        for pair, minimum_ratio in preset.min_joint_price_ratio_by_pair.items():
+            outcome = benchmarks.stage_game_outcomes[pair]
+            if outcome.joint_price_b <= 0.0:
+                raise ValueError(f"Non-positive joint price for firm B in {pair}")
+            realized_ratio = outcome.joint_price_a / outcome.joint_price_b
+            if realized_ratio < minimum_ratio:
+                raise ValueError(
+                    f"Expected {pair} joint A/B price ratio at least {minimum_ratio:.3f}, got {realized_ratio:.3f}"
+                )
 
 
 class QualityBlockAgent:
@@ -462,6 +631,8 @@ class QualityBlockAgent:
             "- Choose the quality that maximizes long-run profit over the full block and the repeated game.\n"
             "- You do not observe the competitor's current quality choice yet."
         )
+        if self.preset.quality_prompt_context:
+            instructions += self.preset.quality_prompt_context
         notes = (
             "\nYour previous QUALITY_PLANS.txt:\n"
             + (self.state.quality_plans or "<empty>")
@@ -507,6 +678,8 @@ class QualityBlockAgent:
             "- Quality affects demand and competitive positioning as well as cost, so use this block to learn how the current quality pair changes pricing power, volume, and profit.\n"
             "- Maximize long-run profit while accounting for the locked quality pair."
         )
+        if self.preset.price_prompt_context:
+            instructions += self.preset.price_prompt_context
         notes = (
             "\nYour previous PRICE_PLANS.txt:\n"
             + (self.state.price_plans or "<empty>")
