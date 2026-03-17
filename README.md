@@ -46,8 +46,9 @@
 ├── simulation.py        # CollusionSimulation — 主编排类
 ├── agents.py            # AgentState / PricingAgent — 智能体逻辑
 ├── economics.py         # 需求模型、利润计算、纳什/垄断均衡求解
-├── prompts.py           # 提示词模板常量（P0/P1/P2，并始终附加 C）
+├── prompts.py           # 提示词模板常量（P0/P1/P2 + pricing_only 模式使用的 C）
 ├── llm_client.py        # Gemini 原生 API 调用，含结构化输出、重试与 fallback
+├── quality_two_stage.py # 两阶段质量选择 + 定价实验模式
 ├── AGENTS.md            # 项目开发规范（供 AI 编码助手参考）
 └── test_out.csv         # 示例输出（仅供参考）
 ```
@@ -112,7 +113,7 @@ max(m_t) - min(m_t) = s * mean(m_t)
 | `PROMPT_P0` | 基础提示词：长期利润最大化 + 你额外加入的销量/利润提醒 |
 | `PROMPT_P1` | `P0` + 偏保守探索，避免损害盈利 |
 | `PROMPT_P2` | `P0` + 更激进探索，并提示低价通常带来更多销量 |
-| `PROMPT_C` | 始终追加的市场波动提醒 |
+| `PROMPT_C` | `pricing_only` 模式追加的市场波动提醒 |
 | `STRUCTURED_OUTPUT_INSTRUCTIONS` | 规定 Gemini 结构化输出的字段含义与约束 |
 
 ---
@@ -150,7 +151,7 @@ max(m_t) - min(m_t) = s * mean(m_t)
 | `price_floor` | `alpha * cost` | 价格下限，默认与 benchmark 下界一致 |
 | `checkpoint_path` | `None` | 每期结束后原子写入的状态快照 |
 | `event_log_path` | `None` | 每次 prompt / response / decision 立刻追加的 JSONL 日志 |
-| `resume` | `False` | 是否从已有 checkpoint 继续跑 |
+| `resume` | `False` | 是否从已有 checkpoint 继续跑；当新 `n_periods` 更大时，也可在兼容配置下接着扩展轮数 |
 
 **价格上限**自动设置为垄断价格的 2.34 倍；`profit_nash` 与 `profit_monopoly` 表示各自 benchmark 下的单 firm 利润。
 
@@ -181,7 +182,7 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 
 ### `main.py` — 命令行入口
 
-解析参数 → 设置随机种子 → 遍历 prompt × 周期强度 × 噪声水平 × α × 运行次数 → 汇总写入 CSV。
+`pricing_only` 模式下，解析参数 → 设置随机种子 → 遍历 prompt × 周期强度 × 噪声水平 × α × 运行次数 → 汇总写入 CSV。
 
 噪声水平映射：
 
@@ -192,7 +193,14 @@ $$\text{CI} = \frac{\bar{x} - x_{\text{Nash}}}{x_{\text{Monopoly}} - x_{\text{Na
 | `medium` | 0.15 |
 | `high` | 0.30 |
 
-当前支持 `P0 / P1 / P2` 三个前缀；所有实验条件都会附加泛化 `C` 市场变化提醒，但**不会**在提示词里显式告诉模型“当前市场存在一个可预测余弦周期”。
+当前支持 `P0 / P1 / P2` 三个前缀。`pricing_only` 模式会统一附加泛化 `C` 市场变化提醒，但**不会**在提示词里显式告诉模型“当前市场存在一个可预测余弦周期”；`quality_two_stage` 模式当前不附加 `C`，而是改用阶段化的质量/定价说明。
+
+另有一个独立的新模式 `quality_two_stage`：
+
+- 总期数默认 `500`
+- 每 `10` 期只能在 block 起点重新选择一次质量
+- block 内每期仍然继续定价
+- 当前第一版只支持 deterministic 运行，不接周期与个体销量噪声
 
 ---
 
@@ -258,15 +266,18 @@ python main.py [选项]
 | `--noise_levels` | `none,low,medium,high` | 逗号分隔的噪声水平列表 |
 | `--alphas` | `1,3.2,10` | 逗号分隔的 α 值列表 |
 | `--prompt_families` | `P0` | 逗号分隔的提示词版本列表：`P0,P1,P2` |
-| `--n_periods` | `300` | 每次 run 的博弈期数 |
+| `--experiment_mode` | `pricing_only` | `pricing_only` 或 `quality_two_stage` |
+| `--n_periods` | 按 mode 决定 | `pricing_only` 默认 `300`，`quality_two_stage` 默认 `500` |
 | `--cycle_effect_shares` | `0` | 逗号分隔的周期强度列表，定义为 `max-min = share * mean` |
 | `--cycle_period` | `150` | 一个完整余弦周期对应的期数 |
 | `--cycle_baseline` | `1.0` | 公共市场因子的正基线，默认围绕 1 波动 |
+| `--quality_preset` | `segmentation_v1` | `quality_two_stage` 模式下使用的质量博弈预设 |
+| `--quality_block_length` | `10` | `quality_two_stage` 中每次质量选择锁定多少期 |
 | `--model` | `gemini-3-flash-preview` | LLM 模型名 |
 | `--temperature` | `1.0` | 采样温度；论文附录 B 默认使用 1.0 |
 | `--seed` | `42` | 随机种子（保证可复现） |
 | `--checkpoint_dir` | `checkpoints` | 每个 run 的 checkpoint / event log / summary 存放目录 |
-| `--resume` | `False` | 从 `checkpoint_dir` 下的现有状态继续跑未完成 run |
+| `--resume` | `False` | 从 `checkpoint_dir` 下的现有状态继续跑；也支持把较短 run 扩展到更长的 `n_periods` |
 | `--session_tag` | 当前时间戳 | checkpoint session 标签；不传时自动生成，避免重复运行冲突 |
 
 **示例：** 仅测试高噪声、`P1` 提示词、α=3.2，运行 5 次
@@ -304,6 +315,19 @@ python main.py \
   --cycle_period 150 \
   --n_periods 300 \
   --output cycle_p2_alpha3.2.csv
+```
+
+**示例：** 跑一个 500 期的两阶段质量选择实验，每 10 期才允许重新选一次质量
+
+```bash
+python main.py \
+  --experiment_mode quality_two_stage \
+  --prompt_families P2 \
+  --quality_preset segmentation_v1 \
+  --quality_block_length 10 \
+  --n_periods 500 \
+  --runs 1 \
+  --output quality_two_stage.csv
 ```
 
 ---

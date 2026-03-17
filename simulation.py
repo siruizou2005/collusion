@@ -223,11 +223,18 @@ class CollusionSimulation:
             "cycle_period": 150,
             "cycle_baseline": 1.0,
         }
+        saved_n_periods = int(saved_config.get("n_periods", 0))
+        if saved_n_periods <= 0:
+            raise ValueError("Checkpoint is missing a valid 'n_periods' value")
+        if saved_n_periods > self.n_periods:
+            raise ValueError(
+                f"Checkpoint config mismatch on 'n_periods': "
+                f"{saved_n_periods} > {self.n_periods}"
+            )
         for key in [
             "prompt_family",
             "noise_sigma",
             "alpha",
-            "n_periods",
             "model",
             "temperature",
             "cycle_effect_share",
@@ -249,6 +256,8 @@ class CollusionSimulation:
         self._append_event({
             "event": "resume",
             "last_completed_period": last_completed_period,
+            "saved_n_periods": saved_n_periods,
+            "target_n_periods": self.n_periods,
         })
         return last_completed_period + 1
 
